@@ -1,216 +1,253 @@
 import { Server } from "socket.io";
 
-let connection = {};
-let message = {};
-let timeOnline = {};
+const connection = {};
+const message = {};
+const timeOnline = {};
 
 const MAX_MESSAGES_PER_ROOM = 200;
 
-const isValidRoomId = (id) =>
-  typeof id === "string" && /^[a-zA-Z0-9_-]{1,60}$/.test(id);
+// Utility to normalize room IDs (handles raw IDs or full URLs like http://localhost:5173/room-code)
+const normalizeRoomId = (rawPath) => {
+  if (typeof rawPath !== "string") return "";
+  try {
+    if (rawPath.startsWith("http://") || rawPath.startsWith("https://")) {
+      const url = new URL(rawPath);
+      return url.pathname.replace(/^\/+/, "").replace(/\/+$/, "") || "default";
+    }
+  } catch (e) {
+    // fallback to string manipulation if URL parsing fails
+  }
+  return rawPath.trim().replace(/^\/+/, "").replace(/\/+$/, "");
+};
+
 const isValidUsername = (name) =>
-  typeof name === "string" && name.trim().length > 0 && name.length <= 40;
+  typeof name === "string" && name.trim().length > 0 && name.length <= 60;
 
 export const connectToSocket = (server) => {
   const io = new Server(server, {
     cors: {
-      origin: process.env.CLIENT_ORIGIN || "http://localhost:5173",
+      origin: true,
       methods: ["GET", "POST"],
       credentials: true,
     },
   });
 
   io.on("connection", (socket) => {
-    console.log("New socket connected:", socket.id);
+    console.log("New socket client connected:", socket.id);
 
     // ---- JOIN CALL ----
-    socket.on("join-call", (path, userName, video = true, audio = true) => {
+    socket.on("join-call", (rawPath, userName, video = true, audio = true) => {
       try {
-        if (!isValidRoomId(path)) {
-          return socket.emit("join-error", "Invalid room id");
-        }
-        if (!isValidUsername(userName)) {
-          return socket.emit("join-error", "Invalid username");
+        const roomId = normalizeRoomId(rawPath);
+        const name = isValidUsername(userName) ? userName.trim() : "Participant";
+
+        if (!roomId) {
+          return socket.emit("join-error", "Invalid room code");
         }
 
-        if (!connection[path]) {
-          connection[path] = [];
+        socket.roomId = roomId;
+
+        if (!connection[roomId]) {
+          connection[roomId] = [];
         }
 
-        // Prevent duplicate join: ignore if this socket is already in the room
-        const alreadyJoined = connection[path].some(
-          (user) => user.id === socket.id,
+        // Prevent duplicate socket entries in the same room
+        const alreadyJoined = connection[roomId].some(
+          (user) => user.id === socket.id
         );
-        if (alreadyJoined) return;
 
-        connection[path].push({
-          id: socket.id,
-          username: userName,
-          video: !!video,
-          audio: !!audio,
-        });
-        timeOnline[socket.id] = new Date();
-
-        // Notify existing users
-        for (let i = 0; i < connection[path].length; i++) {
-          io.to(connection[path][i].id).emit(
-            "user-joined",
-            socket.id,
-            connection[path],
-            userName,
+        if (!alreadyJoined) {
+          connection[roomId].push({
+            id: socket.id,
+            username: name,
+            video: !!video,
+            audio: !!audio,
+          });
+        } else {
+          // Update flags if re-joining
+          connection[roomId] = connection[roomId].map((u) =>
+            u.id === socket.id ? { ...u, username: name, video: !!video, audio: !!audio } : u
           );
         }
 
-        // Send old chat messages if exist
-        if (message[path]) {
-          for (let i = 0; i < message[path].length; ++i) {
-            io.to(socket.id).emit(
+        timeOnline[socket.id] = new Date();
+        socket.join(roomId);
+
+        // Send existing participants & room info to joining user
+        const roomUsers = connection[roomId];
+
+        // Broadcast user-joined to all clients in room
+        io.in(roomId).emit("user-joined", socket.id, roomUsers, name);
+
+        // Send chat history to newly joined participant
+        if (message[roomId] && Array.isArray(message[roomId])) {
+          message[roomId].forEach((msg) => {
+            socket.emit(
               "chat-message",
-              message[path][i]["data"],
-              message[path][i]["sender"],
-              message[path][i]["socket-id-sender"],
+              msg.data,
+              msg.sender,
+              msg["socket-id-sender"]
             );
-          }
+          });
         }
       } catch (err) {
-        console.error("join-call error:", err);
+        console.error("Error in join-call handler:", err);
         socket.emit("join-error", "Could not join room");
       }
     });
 
-    // ---- SIGNAL ----
+    // ---- WEBRTC SIGNALING ----
     socket.on("signal", (toId, signalMessage) => {
       try {
         if (typeof toId !== "string" || !signalMessage) return;
         io.to(toId).emit("signal", socket.id, signalMessage);
       } catch (err) {
-        console.error("signal error:", err);
+        console.error("Error in WebRTC signal handler:", err);
       }
     });
 
-    // ---- CHAT MESSAGE ----
+    // ---- CHAT MESSAGES ----
     socket.on("chat-message", (data, sender) => {
       try {
         if (typeof data !== "string" || data.trim().length === 0) return;
 
-        const [matchingRoom, found] = Object.entries(connection).reduce(
-          ([room, isFound], [roomKey, roomValue]) => {
-            if (!isFound && roomValue.some((user) => user.id === socket.id)) {
-              return [roomKey, true];
-            }
-            return [room, isFound];
-          },
-          ["", false],
-        );
+        const roomId = socket.roomId;
+        if (!roomId || !connection[roomId]) return;
 
-        if (found) {
-          if (!message[matchingRoom]) {
-            message[matchingRoom] = [];
-          }
+        const senderName = isValidUsername(sender) ? sender.trim() : "Guest";
 
-          message[matchingRoom].push({
-            sender,
-            data,
-            "socket-id-sender": socket.id,
-          });
-
-          // Cap history so it can't grow forever
-          if (message[matchingRoom].length > MAX_MESSAGES_PER_ROOM) {
-            message[matchingRoom].shift();
-          }
-
-          console.log("message", matchingRoom, ":", sender, data);
-
-          connection[matchingRoom].forEach((element) => {
-            io.to(element.id).emit("chat-message", data, sender, socket.id);
-          });
+        if (!message[roomId]) {
+          message[roomId] = [];
         }
+
+        const msgObj = {
+          sender: senderName,
+          data: data.trim(),
+          "socket-id-sender": socket.id,
+          timestamp: new Date(),
+        };
+
+        message[roomId].push(msgObj);
+
+        if (message[roomId].length > MAX_MESSAGES_PER_ROOM) {
+          message[roomId].shift();
+        }
+
+        // Broadcast to everyone in room
+        io.in(roomId).emit("chat-message", msgObj.data, msgObj.sender, socket.id);
       } catch (err) {
-        console.error("chat-message error:", err);
+        console.error("Error in chat-message handler:", err);
       }
     });
 
-    // ---- MEDIA CONTROLS ----
+    // ---- MEDIA CONTROLS TOGGLE ----
     socket.on("toggle-audio", (payload) => {
       try {
-        if (!payload) return;
-        const { roomId, audio } = payload;
-        if (connection[roomId]) {
+        const roomId = socket.roomId || normalizeRoomId(payload?.roomId);
+        const audioState = !!payload?.audio;
+
+        if (roomId && connection[roomId]) {
           connection[roomId].forEach((user) => {
             if (user.id === socket.id) {
-              user.audio = !!audio;
+              user.audio = audioState;
             }
-            if (user.id !== socket.id) {
-              io.to(user.id).emit("media-toggled", {
-                socketId: socket.id,
-                type: "audio",
-                state: !!audio,
-              });
-            }
+          });
+          io.in(roomId).emit("media-toggled", {
+            socketId: socket.id,
+            type: "audio",
+            state: audioState,
           });
         }
       } catch (err) {
-        console.error("toggle-audio error:", err);
+        console.error("Error in toggle-audio handler:", err);
       }
     });
 
     socket.on("toggle-video", (payload) => {
       try {
-        if (!payload) return;
-        const { roomId, video } = payload;
-        if (connection[roomId]) {
+        const roomId = socket.roomId || normalizeRoomId(payload?.roomId);
+        const videoState = !!payload?.video;
+
+        if (roomId && connection[roomId]) {
           connection[roomId].forEach((user) => {
             if (user.id === socket.id) {
-              user.video = !!video;
+              user.video = videoState;
             }
-            if (user.id !== socket.id) {
-              io.to(user.id).emit("media-toggled", {
-                socketId: socket.id,
-                type: "video",
-                state: !!video,
-              });
-            }
+          });
+          io.in(roomId).emit("media-toggled", {
+            socketId: socket.id,
+            type: "video",
+            state: videoState,
           });
         }
       } catch (err) {
-        console.error("toggle-video error:", err);
+        console.error("Error in toggle-video handler:", err);
+      }
+    });
+
+    // ---- LEAVE CALL EXPLICIT EVENT ----
+    socket.on("leave-call", () => {
+      try {
+        const roomId = socket.roomId;
+        if (roomId && connection[roomId]) {
+          io.in(roomId).emit("user-left", socket.id);
+
+          connection[roomId] = connection[roomId].filter(
+            (user) => user.id !== socket.id
+          );
+
+          if (connection[roomId].length === 0) {
+            delete connection[roomId];
+            delete message[roomId];
+          }
+        }
+      } catch (err) {
+        console.error("Error in leave-call handler:", err);
       }
     });
 
     // ---- DISCONNECT ----
     socket.on("disconnect", () => {
       try {
-        const diffTime = Math.abs(timeOnline[socket.id] - new Date());
-        console.log(`User ${socket.id} disconnected after ${diffTime / 1000}s`);
+        const durationSec = timeOnline[socket.id]
+          ? (new Date() - timeOnline[socket.id]) / 1000
+          : 0;
+        console.log(`Socket ${socket.id} disconnected after ${durationSec.toFixed(1)}s`);
 
-        for (const [room, persons] of Object.entries(connection)) {
-          if (persons.some((user) => user.id === socket.id)) {
-            // Notify other users
-            persons.forEach((user) => {
-              io.to(user.id).emit("user-left", socket.id);
-            });
+        const roomId = socket.roomId;
+        if (roomId && connection[roomId]) {
+          // Notify room participants with server io instance
+          io.in(roomId).emit("user-left", socket.id);
 
-            // Remove user
-            connection[room] = persons.filter((user) => user.id !== socket.id);
+          // Remove user from room state
+          connection[roomId] = connection[roomId].filter(
+            (user) => user.id !== socket.id
+          );
 
-            // Cleanup empty room
-            if (connection[room].length === 0) {
-              delete connection[room];
-              delete message[room]; // free chat history for the closed room
+          // Cleanup empty room
+          if (connection[roomId].length === 0) {
+            delete connection[roomId];
+            delete message[roomId];
+          }
+        } else {
+          // Fallback scan across all rooms if roomId wasn't set directly
+          for (const [rId, persons] of Object.entries(connection)) {
+            if (persons.some((u) => u.id === socket.id)) {
+              io.in(rId).emit("user-left", socket.id);
+              connection[rId] = persons.filter((u) => u.id !== socket.id);
+              if (connection[rId].length === 0) {
+                delete connection[rId];
+                delete message[rId];
+              }
             }
           }
         }
 
-        // Clean up per-socket state so it doesn't leak forever
         delete timeOnline[socket.id];
       } catch (err) {
-        console.error("disconnect error:", err);
+        console.error("Error in disconnect handler:", err);
       }
     });
-
-    socket.on("error", (err) =>
-      console.error(`Socket ${socket.id} error:`, err),
-    );
   });
 
   return io;
