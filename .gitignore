@@ -1,26 +1,39 @@
+# ==========================================
+# Vionex Backend - Git Ignore Rules
+# Strictly prevents secret leakage and build bloat
+# ==========================================
+
+# Environment & Secret files
 .env
-node_modules
+.env.*
+.env*.local
+!.env.example
+*.env
+*.local
 
+# Dependencies
+node_modules/
 
-# Logs
-logs
+# Production build outputs & cache
+dist/
+dist-ssr/
+build/
+.cache/
+
+# Logs & debugging
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
-lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
-*.local
-
-# Editor directories and files
+# Editor & OS files
 .vscode/*
 !.vscode/extensions.json
-.idea
+.idea/
 .DS_Store
+Thumbs.db
 *.suo
 *.ntvs*
 *.njsproj

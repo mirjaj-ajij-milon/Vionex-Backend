@@ -1,26 +1,35 @@
 {
   "name": "backend",
   "version": "1.0.0",
-  "description": "",
+  "description": "Vionex Video Calling Backend",
   "license": "ISC",
   "author": "Mirjaj Ajij Milon",
   "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "node --watch index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "cross-env NODE_ENV=development node --watch index.js",
+    "prod": "cross-env NODE_ENV=production node index.js",
+    "test": "cross-env NODE_ENV=test node --test"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
     "cors": "^2.8.5",
-    "crypto": "^1.0.1",
-    "crypto-js": "^4.2.0",
+    "cross-env": "^10.1.0",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
+    "express-rate-limit": "^7.5.0",
     "http-status": "^2.1.0",
-    "mongoose": "^8.18.0",
-    "socket.io": "^4.8.1",
-    "socket.io-client": "^4.8.1"
+    "mongoose": "^8.24.6",
+    "socket.io": "^4.8.1"
+  },
+  "overrides": {
+    "proxy-addr": "^2.0.8",
+    "path-to-regexp": "^8.4.2",
+    "ws": "^8.21.3",
+    "engine.io": "^6.6.11",
+    "socket.io-parser": "^4.2.7",
+    "body-parser": "^2.3.0",
+    "qs": "^6.16.1"
   }
 }
